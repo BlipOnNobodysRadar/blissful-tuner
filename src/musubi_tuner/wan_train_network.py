@@ -719,6 +719,11 @@ def wan_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
     )
     parser.add_argument("--vae_cache_cpu", action="store_true", help="cache features in VAE on CPU")
     parser.add_argument("--one_frame", action="store_true", help="Use one frame sampling method for sample generation")
+    parser.add_argument(
+        "--staged_training",
+        action="store_true",
+        help="Enable staged curriculum training using dataset stage values",
+    )
 
     # Wan2.2 specific arguments
     parser.add_argument("--dit_high_noise", type=str, required=False, default=None, help="DiT checkpoint path for high noise model")

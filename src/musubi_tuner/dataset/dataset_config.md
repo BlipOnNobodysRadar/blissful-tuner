@@ -47,12 +47,16 @@ num_repeats = 1 # optional, default is 1. Number of times to repeat the dataset.
 
 `num_repeats` is also available. It is optional, default is 1 (no repeat). It repeats the images (or videos) that many times to expand the dataset. For example, if `num_repeats = 2` and there are 20 images in the dataset, each image will be duplicated twice (with the same caption) to have a total of 40 images. It is useful to balance the multiple datasets with different sizes.
 
+`stage` is optional (default is `1`). When Wan staged training (`--staged_training`) is enabled, datasets are consumed in ascending stage order and datasets with the same stage are mixed within that stage.
+
 <details>
 <summary>日本語</summary>
 
 `cache_directory` はオプションです。デフォルトは画像ディレクトリと同じディレクトリに設定されます。ただし、異なるデータセット間でキャッシュファイルが共有されるのを防ぐために、明示的に別のキャッシュディレクトリを設定することをお勧めします。
 
 `num_repeats` はオプションで、デフォルトは 1 です（繰り返しなし）。画像（や動画）を、その回数だけ単純に繰り返してデータセットを拡張します。たとえば`num_repeats = 2`としたとき、画像20枚のデータセットなら、各画像が2枚ずつ（同一のキャプションで）計40枚存在した場合と同じになります。異なるデータ数のデータセット間でバランスを取るために使用可能です。
+
+`stage` は任意項目で、デフォルトは `1` です。Wan の段階的学習（`--staged_training`）を有効にした場合に使用され、値が小さい段階から順番に消化され、同じ値のデータセットは同じ段階内で混在して学習されます。
 
 resolution, caption_extension, batch_size, num_repeats, enable_bucket, bucket_no_upscale は general または datasets のどちらかに設定してください。省略時は各項目のデフォルト値が使用されます。
 

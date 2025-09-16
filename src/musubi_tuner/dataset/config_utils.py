@@ -34,6 +34,7 @@ class BaseDatasetParams:
     cache_directory: Optional[str] = None
     debug_dataset: bool = False
     architecture: str = "no_default"  # short style like "hv" or "wan"
+    stage: int = 1
 
 
 @dataclass
@@ -109,6 +110,7 @@ class ConfigSanitizer:
         "resolution": functools.partial(__validate_and_convert_scalar_or_twodim.__func__, int),
         "enable_bucket": bool,
         "bucket_no_upscale": bool,
+        "stage": int,
     }
     IMAGE_DATASET_DISTINCT_SCHEMA = {
         "image_directory": str,
@@ -292,6 +294,7 @@ def generate_dataset_group_by_blueprint(
         resolution: {dataset.resolution}
         batch_size: {dataset.batch_size}
         num_repeats: {dataset.num_repeats}
+        stage: {getattr(dataset, 'stage', 1)}
         caption_extension: "{dataset.caption_extension}"
         enable_bucket: {dataset.enable_bucket}
         bucket_no_upscale: {dataset.bucket_no_upscale}

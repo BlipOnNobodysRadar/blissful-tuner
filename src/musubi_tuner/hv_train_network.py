@@ -13,7 +13,7 @@ import random
 import time
 import json
 from multiprocessing import Value
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 import accelerate
 import numpy as np
 from packaging.version import Version
@@ -43,7 +43,13 @@ from musubi_tuner.modules.lr_schedulers import RexLR
 from musubi_tuner.modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
 import musubi_tuner.networks.lora as lora_module
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
-from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_HUNYUAN_VIDEO, ARCHITECTURE_HUNYUAN_VIDEO_FULL
+from musubi_tuner.dataset.image_video_dataset import (
+    ARCHITECTURE_HUNYUAN_VIDEO,
+    ARCHITECTURE_HUNYUAN_VIDEO_FULL,
+    ImageDataset,
+    StageAwareDistributedSampler,
+    VideoDataset,
+)
 from musubi_tuner.hv_generate_video import save_images_grid, save_videos_grid, resize_image_to_bucket, encode_to_latents
 
 from blissful_tuner.blissful_logger import BlissfulLogger
@@ -1837,13 +1843,44 @@ class NetworkTrainer:
 
         # prepare dataloader
 
+        staged_training = getattr(args, "staged_training", False)
+        stage_sampler = None
+        if staged_training:
+            stage_map: dict[int, list[Union[ImageDataset, VideoDataset]]] = {}
+            for dataset in train_dataset_group.datasets:
+                stage = getattr(dataset, "stage", 1)
+                stage_map.setdefault(stage, []).append(dataset)
+
+            stage_order = sorted(stage_map.keys())
+            stage_sampler = StageAwareDistributedSampler(
+                train_dataset_group,
+                num_replicas=accelerator.num_processes,
+                rank=accelerator.process_index,
+                seed=args.seed,
+            )
+
+            stage_descriptions = []
+            stage_lengths = stage_sampler.stage_lengths
+            for stage in stage_order:
+                dataset_descriptions = []
+                for dataset in stage_map[stage]:
+                    dataset_descriptions.append(
+                        f"{dataset.__class__.__name__} (batches={len(dataset)})"
+                    )
+                stage_total = stage_lengths.get(stage, 0)
+                stage_descriptions.append(
+                    f"Stage {stage} ({stage_total} batches): {', '.join(dataset_descriptions)}"
+                )
+            logger.info("Staged training order:\n" + "\n".join(stage_descriptions))
+
         # num workers for data loader: if 0, persistent_workers is not available
         n_workers = min(args.max_data_loader_n_workers, os.cpu_count())  # cpu_count or max_data_loader_n_workers
 
         train_dataloader = torch.utils.data.DataLoader(
             train_dataset_group,
             batch_size=1,
-            shuffle=True,
+            shuffle=stage_sampler is None,
+            sampler=stage_sampler,
             collate_fn=collator,
             num_workers=n_workers,
             persistent_workers=args.persistent_data_loader_workers,
@@ -2143,6 +2180,9 @@ class NetworkTrainer:
             metadata["ss_epoch"] = str(epoch + 1)
 
             accelerator.unwrap_model(network).on_epoch_start(transformer)
+
+            if stage_sampler is not None:
+                stage_sampler.set_epoch(epoch)
 
             for step, batch in enumerate(train_dataloader):
                 latents = batch["latents"]

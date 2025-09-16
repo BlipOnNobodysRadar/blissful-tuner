@@ -1309,6 +1309,7 @@ class BaseDataset(torch.utils.data.Dataset):
         cache_directory: Optional[str] = None,
         debug_dataset: bool = False,
         architecture: str = "no_default",
+        stage: int = 1,
     ):
         self.resolution = resolution
         self.caption_extension = caption_extension
@@ -1319,6 +1320,7 @@ class BaseDataset(torch.utils.data.Dataset):
         self.cache_directory = cache_directory
         self.debug_dataset = debug_dataset
         self.architecture = architecture
+        self.stage = stage
         self.seed = None
         self.current_epoch = 0
 
@@ -1481,6 +1483,7 @@ class ImageDataset(BaseDataset):
         qwen_image_edit_control_resolution: Optional[Tuple[int, int]] = None,
         debug_dataset: bool = False,
         architecture: str = "no_default",
+        stage: int = 1,
     ):
         super(ImageDataset, self).__init__(
             resolution,
@@ -1492,6 +1495,7 @@ class ImageDataset(BaseDataset):
             cache_directory,
             debug_dataset,
             architecture,
+            stage=stage,
         )
         self.image_directory = image_directory
         self.image_jsonl_file = image_jsonl_file
@@ -1762,6 +1766,7 @@ class VideoDataset(BaseDataset):
         fp_latent_window_size: Optional[int] = 9,
         debug_dataset: bool = False,
         architecture: str = "no_default",
+        stage: int = 1,
     ):
         super(VideoDataset, self).__init__(
             resolution,
@@ -1773,6 +1778,7 @@ class VideoDataset(BaseDataset):
             cache_directory,
             debug_dataset,
             architecture,
+            stage=stage,
         )
         self.video_directory = video_directory
         self.video_jsonl_file = video_jsonl_file
@@ -2081,3 +2087,107 @@ class DatasetGroup(torch.utils.data.ConcatDataset):
     def set_max_train_steps(self, max_train_steps):
         for dataset in self.datasets:
             dataset.set_max_train_steps(max_train_steps)
+
+
+class StageAwareDistributedSampler(torch.utils.data.Sampler[int]):
+    """Sampler that iterates dataset batches stage by stage across distributed processes."""
+
+    def __init__(
+        self,
+        dataset_group: DatasetGroup,
+        num_replicas: int = 1,
+        rank: int = 0,
+        seed: int = 0,
+        drop_last: bool = False,
+    ) -> None:
+        if num_replicas <= 0:
+            raise ValueError("num_replicas must be positive")
+        if rank < 0 or rank >= num_replicas:
+            raise ValueError("rank must be in the range [0, num_replicas)")
+
+        self.dataset = dataset_group
+        self.num_replicas = num_replicas
+        self.rank = rank
+        self.seed = seed
+        self.drop_last = drop_last
+        self.epoch = 0
+
+        self.stage_to_indices: dict[int, list[int]] = {}
+        offset = 0
+        for dataset in self.dataset.datasets:
+            length = len(dataset)
+            stage = getattr(dataset, "stage", 1)
+            if length <= 0:
+                offset += length
+                continue
+
+            indices = list(range(offset, offset + length))
+            if stage not in self.stage_to_indices:
+                self.stage_to_indices[stage] = []
+            self.stage_to_indices[stage].extend(indices)
+            offset += length
+
+        if len(self.stage_to_indices) == 0:
+            raise ValueError("Staged sampler received an empty dataset group")
+
+        self.stage_order = sorted(self.stage_to_indices.keys())
+        self._stage_lengths = {stage: len(indices) for stage, indices in self.stage_to_indices.items()}
+
+        total_indices = sum(self._stage_lengths.values())
+        if self.drop_last:
+            self.num_samples = total_indices // self.num_replicas
+        else:
+            self.num_samples = math.ceil(total_indices / self.num_replicas)
+
+        self.total_size = self.num_samples * self.num_replicas
+        self._total_indices = total_indices
+
+    def __len__(self) -> int:
+        return self.num_samples
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = epoch
+
+    def _get_last_stage_indices(self) -> list[int]:
+        for stage in reversed(self.stage_order):
+            indices = self.stage_to_indices.get(stage, [])
+            if indices:
+                return list(indices)
+        return []
+
+    def _shuffle_stage_indices(self, generator: torch.Generator) -> list[int]:
+        ordered_indices: list[int] = []
+        for stage in self.stage_order:
+            indices = list(self.stage_to_indices.get(stage, []))
+            if len(indices) == 0:
+                continue
+            perm = torch.randperm(len(indices), generator=generator).tolist()
+            indices = [indices[i] for i in perm]
+            ordered_indices.extend(indices)
+        return ordered_indices
+
+    def __iter__(self):
+        g = torch.Generator()
+        g.manual_seed(self.seed + self.epoch)
+
+        indices = self._shuffle_stage_indices(g)
+
+        if self.drop_last:
+            indices = indices[: self.total_size]
+        else:
+            padding_size = self.total_size - len(indices)
+            if padding_size > 0:
+                last_stage_indices = self._get_last_stage_indices()
+                if not last_stage_indices:
+                    raise ValueError("Unable to pad staged sampler because there are no stage indices")
+                repeat = (padding_size + len(last_stage_indices) - 1) // len(last_stage_indices)
+                padding = (last_stage_indices * repeat)[:padding_size]
+                indices.extend(padding)
+
+        # Subsample for this replica
+        indices = indices[self.rank : self.total_size : self.num_replicas]
+        return iter(indices)
+
+    @property
+    def stage_lengths(self) -> dict[int, int]:
+        return dict(self._stage_lengths)
