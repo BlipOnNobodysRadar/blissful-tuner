@@ -2135,6 +2135,7 @@ class StageAwareDistributedSampler(torch.utils.data.Sampler[int]):
             raise ValueError("Staged sampler received an empty dataset group")
 
         self.stage_order = sorted(self.stage_to_indices.keys())
+        self._stage_positions = {stage: idx for idx, stage in enumerate(self.stage_order)}
 
         self._stage_iterations_per_replica: dict[int, int] = {}
         total_per_replica = 0
@@ -2200,3 +2201,7 @@ class StageAwareDistributedSampler(torch.utils.data.Sampler[int]):
     @property
     def stage_lengths(self) -> dict[int, int]:
         return dict(self._stage_iterations_per_replica)
+
+    @property
+    def stage_positions(self) -> dict[int, int]:
+        return dict(self._stage_positions)

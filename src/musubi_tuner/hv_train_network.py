@@ -89,6 +89,30 @@ def clean_memory_on_device(device: torch.device):
         torch.mps.empty_cache()
 
 
+def reset_compile_state():
+    """Best-effort reset of torch.compile runtime caches between curriculum stages."""
+
+    try:
+        import torch._dynamo as _dynamo  # type: ignore[attr-defined]
+    except Exception:
+        _dynamo = None
+    if _dynamo is not None:
+        try:
+            _dynamo.reset()
+        except Exception:
+            pass
+
+    try:
+        from torch._inductor import utils as _inductor_utils  # type: ignore[attr-defined]
+    except Exception:
+        _inductor_utils = None
+    if _inductor_utils is not None:
+        try:
+            _inductor_utils.clear_inductor_caches()
+        except Exception:
+            pass
+
+
 # for collate_fn: epoch and step is multiprocessing.Value
 class collator_class:
     def __init__(self, epoch, step, dataset):
@@ -1845,6 +1869,10 @@ class NetworkTrainer:
 
         staged_training = getattr(args, "staged_training", False)
         stage_sampler = None
+        stage_lengths: dict[int, int] = {}
+        stage_positions: dict[int, int] = {}
+        stage_order: list[int] = []
+        stage_unit = "batches"
         if staged_training:
             stage_map: dict[int, list[Union[ImageDataset, VideoDataset]]] = {}
             for dataset in train_dataset_group.datasets:
@@ -1861,6 +1889,7 @@ class NetworkTrainer:
 
             stage_descriptions = []
             stage_lengths = stage_sampler.stage_lengths
+            stage_positions = stage_sampler.stage_positions
             stage_unit = "batches" if accelerator.num_processes == 1 else "batches per replica"
             for stage in stage_order:
                 dataset_descriptions = []
@@ -2188,6 +2217,9 @@ class NetworkTrainer:
             else:
                 active_stage = None
 
+            stage_batch_counts: dict[int, int] = {}
+            completed_stage_logs: set[int] = set()
+
             for step, batch in enumerate(train_dataloader):
                 batch_stage_value = batch.pop("stage", None)
                 if batch_stage_value is None:
@@ -2198,21 +2230,65 @@ class NetworkTrainer:
                     batch_stage = int(batch_stage_value)
 
                 if stage_sampler is not None:
+                    stage_batch_counts.setdefault(batch_stage, 0)
+
                     if active_stage is None:
                         active_stage = batch_stage
-                        accelerator.print(f"Starting stage {batch_stage}")
+                        stage_batch_counts[batch_stage] = 0
+                        stage_target = stage_lengths.get(batch_stage)
+                        if stage_target:
+                            accelerator.print(
+                                f"Starting stage {batch_stage} ({stage_target} {stage_unit})"
+                            )
+                        else:
+                            accelerator.print(f"Starting stage {batch_stage}")
                     elif batch_stage != active_stage:
-                        if batch_stage < active_stage:
+                        prev_index = stage_positions.get(active_stage, -1)
+                        next_index = stage_positions.get(batch_stage, -1)
+
+                        if next_index == -1:
+                            logger.warning(
+                                f"Received batch from unknown stage {batch_stage}; resetting stage tracker."
+                            )
+                            active_stage = batch_stage
+                            stage_batch_counts[batch_stage] = 0
+                        elif prev_index != -1 and next_index < prev_index:
                             logger.warning(
                                 f"Received batch from stage {batch_stage} after stage {active_stage}."
                             )
                             active_stage = batch_stage
+                            stage_batch_counts[batch_stage] = 0
                         else:
-                            accelerator.print(f"Advancing to stage {batch_stage}")
+                            if prev_index != -1 and next_index > prev_index + 1:
+                                expected_idx = prev_index + 1
+                                if expected_idx < len(stage_order):
+                                    skipped_stage = stage_order[expected_idx]
+                                    logger.warning(
+                                        f"Skipping stage {skipped_stage} when advancing from stage {active_stage} to stage {batch_stage}."
+                                    )
+                            prev_count = stage_batch_counts.get(active_stage, 0)
+                            stage_target = stage_lengths.get(active_stage)
+                            next_target = stage_lengths.get(batch_stage)
+                            if stage_target:
+                                message = (
+                                    f"Completed stage {active_stage} ({prev_count}/{stage_target} {stage_unit}); advancing to stage {batch_stage}"
+                                )
+                            else:
+                                message = (
+                                    f"Completed stage {active_stage} ({prev_count} {stage_unit}); advancing to stage {batch_stage}"
+                                )
+                            if next_target:
+                                message += f" ({next_target} {stage_unit})"
+                            accelerator.print(message)
+                            completed_stage_logs.add(active_stage)
                             accelerator.wait_for_everyone()
+                            reset_compile_state()
                             clean_memory_on_device(accelerator.device)
                             accelerator.wait_for_everyone()
                             active_stage = batch_stage
+                            stage_batch_counts[batch_stage] = 0
+
+                    stage_batch_counts[batch_stage] += 1
 
                 latents = batch["latents"]
                 bsz = latents.shape[0]
@@ -2319,6 +2395,19 @@ class NetworkTrainer:
 
                 if global_step >= args.max_train_steps:
                     break
+
+            if stage_sampler is not None and active_stage is not None and active_stage not in completed_stage_logs:
+                final_count = stage_batch_counts.get(active_stage, 0)
+                stage_target = stage_lengths.get(active_stage)
+                if stage_target:
+                    accelerator.print(
+                        f"Completed stage {active_stage} ({final_count}/{stage_target} {stage_unit})"
+                    )
+                else:
+                    accelerator.print(
+                        f"Completed stage {active_stage} ({final_count} {stage_unit})"
+                    )
+                completed_stage_logs.add(active_stage)
 
             if len(accelerator.trackers) > 0:
                 logs = {"loss/epoch": loss_recorder.moving_average}
