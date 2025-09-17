@@ -1861,6 +1861,7 @@ class NetworkTrainer:
 
             stage_descriptions = []
             stage_lengths = stage_sampler.stage_lengths
+            stage_unit = "batches" if accelerator.num_processes == 1 else "batches per replica"
             for stage in stage_order:
                 dataset_descriptions = []
                 for dataset in stage_map[stage]:
@@ -1869,7 +1870,7 @@ class NetworkTrainer:
                     )
                 stage_total = stage_lengths.get(stage, 0)
                 stage_descriptions.append(
-                    f"Stage {stage} ({stage_total} batches): {', '.join(dataset_descriptions)}"
+                    f"Stage {stage} ({stage_total} {stage_unit}): {', '.join(dataset_descriptions)}"
                 )
             logger.info("Staged training order:\n" + "\n".join(stage_descriptions))
 
@@ -2183,8 +2184,36 @@ class NetworkTrainer:
 
             if stage_sampler is not None:
                 stage_sampler.set_epoch(epoch)
+                active_stage = None
+            else:
+                active_stage = None
 
             for step, batch in enumerate(train_dataloader):
+                batch_stage_value = batch.pop("stage", None)
+                if batch_stage_value is None:
+                    batch_stage = 1
+                elif isinstance(batch_stage_value, torch.Tensor):
+                    batch_stage = int(batch_stage_value.item())
+                else:
+                    batch_stage = int(batch_stage_value)
+
+                if stage_sampler is not None:
+                    if active_stage is None:
+                        active_stage = batch_stage
+                        accelerator.print(f"Starting stage {batch_stage}")
+                    elif batch_stage != active_stage:
+                        if batch_stage < active_stage:
+                            logger.warning(
+                                f"Received batch from stage {batch_stage} after stage {active_stage}."
+                            )
+                            active_stage = batch_stage
+                        else:
+                            accelerator.print(f"Advancing to stage {batch_stage}")
+                            accelerator.wait_for_everyone()
+                            clean_memory_on_device(accelerator.device)
+                            accelerator.wait_for_everyone()
+                            active_stage = batch_stage
+
                 latents = batch["latents"]
                 bsz = latents.shape[0]
                 current_step.value = global_step

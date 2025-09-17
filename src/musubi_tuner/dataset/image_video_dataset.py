@@ -1736,7 +1736,9 @@ class ImageDataset(BaseDataset):
         return len(self.batch_manager)
 
     def __getitem__(self, idx):
-        return self.batch_manager[idx]
+        batch = self.batch_manager[idx]
+        batch["stage"] = self.stage
+        return batch
 
 
 class VideoDataset(BaseDataset):
@@ -2065,7 +2067,9 @@ class VideoDataset(BaseDataset):
         return len(self.batch_manager)
 
     def __getitem__(self, idx):
-        return self.batch_manager[idx]
+        batch = self.batch_manager[idx]
+        batch["stage"] = self.stage
+        return batch
 
 
 class DatasetGroup(torch.utils.data.ConcatDataset):
@@ -2131,16 +2135,24 @@ class StageAwareDistributedSampler(torch.utils.data.Sampler[int]):
             raise ValueError("Staged sampler received an empty dataset group")
 
         self.stage_order = sorted(self.stage_to_indices.keys())
-        self._stage_lengths = {stage: len(indices) for stage, indices in self.stage_to_indices.items()}
 
-        total_indices = sum(self._stage_lengths.values())
-        if self.drop_last:
-            self.num_samples = total_indices // self.num_replicas
-        else:
-            self.num_samples = math.ceil(total_indices / self.num_replicas)
+        self._stage_iterations_per_replica: dict[int, int] = {}
+        total_per_replica = 0
+        for stage, indices in self.stage_to_indices.items():
+            length = len(indices)
+            if length == 0:
+                continue
+            if self.drop_last:
+                per_replica = length // self.num_replicas
+            else:
+                per_replica = math.ceil(length / self.num_replicas)
+            if per_replica == 0:
+                continue
+            self._stage_iterations_per_replica[stage] = per_replica
+            total_per_replica += per_replica
 
+        self.num_samples = total_per_replica
         self.total_size = self.num_samples * self.num_replicas
-        self._total_indices = total_indices
 
     def __len__(self) -> int:
         return self.num_samples
@@ -2148,46 +2160,43 @@ class StageAwareDistributedSampler(torch.utils.data.Sampler[int]):
     def set_epoch(self, epoch: int) -> None:
         self.epoch = epoch
 
-    def _get_last_stage_indices(self) -> list[int]:
-        for stage in reversed(self.stage_order):
-            indices = self.stage_to_indices.get(stage, [])
-            if indices:
-                return list(indices)
-        return []
-
-    def _shuffle_stage_indices(self, generator: torch.Generator) -> list[int]:
-        ordered_indices: list[int] = []
+    def _build_epoch_indices(self, generator: torch.Generator) -> list[int]:
+        per_rank_indices: list[list[int]] = [[] for _ in range(self.num_replicas)]
         for stage in self.stage_order:
-            indices = list(self.stage_to_indices.get(stage, []))
-            if len(indices) == 0:
+            per_replica = self._stage_iterations_per_replica.get(stage, 0)
+            if per_replica == 0:
                 continue
-            perm = torch.randperm(len(indices), generator=generator).tolist()
-            indices = [indices[i] for i in perm]
-            ordered_indices.extend(indices)
-        return ordered_indices
+
+            stage_indices = list(self.stage_to_indices.get(stage, []))
+            if len(stage_indices) == 0:
+                continue
+
+            perm = torch.randperm(len(stage_indices), generator=generator).tolist()
+            shuffled = [stage_indices[i] for i in perm]
+
+            stage_total = per_replica * self.num_replicas
+            if len(shuffled) < stage_total:
+                # Pad within the same stage by repeating indices so every replica advances together.
+                repeat = (stage_total - len(shuffled) + len(shuffled) - 1) // len(shuffled)
+                shuffled.extend((shuffled * repeat)[: stage_total - len(shuffled)])
+            else:
+                shuffled = shuffled[:stage_total]
+
+            for replica in range(self.num_replicas):
+                per_rank_indices[replica].extend(shuffled[replica:stage_total:self.num_replicas])
+
+        return per_rank_indices[self.rank]
 
     def __iter__(self):
         g = torch.Generator()
         g.manual_seed(self.seed + self.epoch)
+        indices = self._build_epoch_indices(g)
 
-        indices = self._shuffle_stage_indices(g)
+        if self.drop_last and len(indices) > self.num_samples:
+            indices = indices[: self.num_samples]
 
-        if self.drop_last:
-            indices = indices[: self.total_size]
-        else:
-            padding_size = self.total_size - len(indices)
-            if padding_size > 0:
-                last_stage_indices = self._get_last_stage_indices()
-                if not last_stage_indices:
-                    raise ValueError("Unable to pad staged sampler because there are no stage indices")
-                repeat = (padding_size + len(last_stage_indices) - 1) // len(last_stage_indices)
-                padding = (last_stage_indices * repeat)[:padding_size]
-                indices.extend(padding)
-
-        # Subsample for this replica
-        indices = indices[self.rank : self.total_size : self.num_replicas]
         return iter(indices)
 
     @property
     def stage_lengths(self) -> dict[int, int]:
-        return dict(self._stage_lengths)
+        return dict(self._stage_iterations_per_replica)
