@@ -436,7 +436,7 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
                 init_kwargs=init_kwargs,
             )
 
-        completed_steps = int(accelerator.state.completed_steps)
+        completed_steps = train_utils.get_accelerator_completed_steps(accelerator, lr_scheduler)
         training_already_finished = completed_steps >= args.max_train_steps
         progress_bar = tqdm(
             total=args.max_train_steps,
@@ -454,6 +454,7 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
             accelerator.print("Checkpoint already completed all requested steps. Skipping training loop.")
 
         global_step = min(completed_steps, args.max_train_steps)
+        accelerator.step = global_step
         resume_step = None
         skip_steps_in_epoch = 0
         if not training_already_finished and completed_steps > 0:
@@ -607,6 +608,7 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
                 if accelerator.sync_gradients:
                     progress_bar.update(1)
                     global_step += 1
+                    accelerator.step = global_step
 
                     # to avoid calling optimizer_eval_fn() too frequently, we call it only when we need to sample images or save the model
                     should_sampling = should_sample_images(args, global_step, epoch=None)

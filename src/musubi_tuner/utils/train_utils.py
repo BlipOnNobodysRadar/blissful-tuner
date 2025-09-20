@@ -11,6 +11,63 @@ from musubi_tuner.utils import huggingface_utils
 logger = BlissfulLogger(__name__, "green")
 
 
+def get_accelerator_completed_steps(
+    accelerator: accelerate.Accelerator, lr_scheduler=None
+) -> int:
+    """Best effort helper to recover the number of completed optimizer steps."""
+
+    state = getattr(accelerator, "state", None)
+    if state is not None:
+        completed = getattr(state, "completed_steps", None)
+        if completed is not None:
+            try:
+                return int(completed)
+            except (TypeError, ValueError):
+                logger.warning("failed to coerce accelerator.state.completed_steps to int")
+
+    step_attr = getattr(accelerator, "step", None)
+    if step_attr is not None:
+        try:
+            step_value = int(step_attr)
+        except (TypeError, ValueError):
+            logger.warning("failed to coerce accelerator.step to int")
+        else:
+            if step_value > 0:
+                logger.debug("falling back to accelerator.step for completed step count")
+                return step_value
+
+    if lr_scheduler is not None:
+        schedulers = (
+            lr_scheduler
+            if isinstance(lr_scheduler, (list, tuple, set))
+            else (lr_scheduler,)
+        )
+        for scheduler in schedulers:
+            if scheduler is None:
+                continue
+            try:
+                scheduler_state = scheduler.state_dict()
+            except Exception:
+                scheduler_state = None
+            if scheduler_state is not None:
+                last_epoch = scheduler_state.get("last_epoch")
+                if last_epoch is None and hasattr(scheduler, "last_epoch"):
+                    last_epoch = getattr(scheduler, "last_epoch")
+                if last_epoch is not None:
+                    try:
+                        last_epoch_value = int(last_epoch)
+                    except (TypeError, ValueError):
+                        logger.warning("failed to coerce lr_scheduler.last_epoch to int")
+                    else:
+                        if last_epoch_value > 0:
+                            logger.debug(
+                                "falling back to lr_scheduler state for completed step count"
+                            )
+                            return last_epoch_value
+
+    return 0
+
+
 # checkpointファイル名
 EPOCH_STATE_NAME = "{}-{:06d}-state"
 EPOCH_FILE_NAME = "{}-{:06d}"
