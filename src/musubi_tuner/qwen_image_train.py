@@ -436,11 +436,35 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
                 init_kwargs=init_kwargs,
             )
 
-        # TODO skip until initial step
-        progress_bar = tqdm(range(args.max_train_steps), smoothing=0, disable=not accelerator.is_local_main_process, desc="steps")
+        completed_steps = int(accelerator.state.completed_steps)
+        training_already_finished = completed_steps >= args.max_train_steps
+        progress_bar = tqdm(
+            total=args.max_train_steps,
+            initial=min(completed_steps, args.max_train_steps),
+            smoothing=0,
+            disable=not accelerator.is_local_main_process,
+            desc="steps",
+        )
 
-        epoch_to_start = 0
-        global_step = 0
+        completed_epochs = int(getattr(accelerator.state, "completed_epochs", 0) or 0)
+        epoch_to_start = completed_epochs
+        if num_update_steps_per_epoch > 0:
+            epoch_to_start = max(epoch_to_start, completed_steps // num_update_steps_per_epoch)
+        if training_already_finished:
+            accelerator.print("Checkpoint already completed all requested steps. Skipping training loop.")
+
+        global_step = min(completed_steps, args.max_train_steps)
+        resume_step = None
+        skip_steps_in_epoch = 0
+        if not training_already_finished and completed_steps > 0:
+            resume_step = completed_steps * args.gradient_accumulation_steps
+            if len(train_dataloader) > 0:
+                skip_steps_in_epoch = resume_step % len(train_dataloader)
+            accelerator.print(
+                f"Resuming from global step {completed_steps} (skip {skip_steps_in_epoch} batches in current epoch)."
+            )
+        if training_already_finished:
+            epoch_to_start = num_train_epochs
         noise_scheduler = FlowMatchDiscreteScheduler(shift=args.discrete_flow_shift, reverse=True, solver="euler")
 
         loss_recorder = train_utils.LossRecorder()
@@ -525,6 +549,10 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
             metadata["ss_epoch"] = str(epoch + 1)
 
             for step, batch in enumerate(train_dataloader):
+                if resume_step is not None:
+                    if epoch == epoch_to_start and step < skip_steps_in_epoch:
+                        continue
+                    resume_step = None
                 latents = batch["latents"]
                 current_step.value = global_step
 
