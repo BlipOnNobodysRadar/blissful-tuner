@@ -13,7 +13,7 @@ from musubi_tuner.hv_train_network import (
     setup_parser_common,
     read_config_from_file,
 )
-
+from musubi_tuner.utils import model_utils
 from blissful_tuner.blissful_logger import BlissfulLogger
 
 logger = BlissfulLogger(__name__, "green")
@@ -277,6 +277,13 @@ class FluxKontextNetworkTrainer(NetworkTrainer):
         )
 
         return model
+
+    def compile_transformer(self, args, transformer):
+        transformer: flux_models.Flux = transformer
+        disable_linear = self.blocks_to_swap > 0 and not args.allow_linear_for_compile
+        return model_utils.compile_transformer(
+            args, transformer, [transformer.double_blocks, transformer.single_blocks], disable_linear=disable_linear
+        )
 
     def scale_shift_latents(self, latents):
         return latents
