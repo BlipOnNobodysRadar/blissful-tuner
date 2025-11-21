@@ -66,6 +66,8 @@ cu124 = [
 cu128 = [
     "torch~=2.7.1",
     "torchvision~=0.22.1",
+    "triton~=3.3.1; platform_system == 'Linux'",
+    "triton-windows~=3.3.1.post21; platform_system == 'Windows'",
 ]
 cu129 = [
     "torch~=2.8.0",

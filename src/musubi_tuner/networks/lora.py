@@ -16,6 +16,14 @@ from blissful_tuner.blissful_logger import BlissfulLogger
 
 logger = BlissfulLogger(__name__, "green")
 
+try:
+    from ramtorch.modules.linear import CPUBouncingLinear
+    from ramtorch.helpers import transfer_ramtensor_to_device
+except ImportError:
+    logger.error("Failed to import ramtorch, please check ramtorch is installed correctly into the venv.")
+    CPUBouncingLinear = type(None)
+    transfer_ramtensor_to_device = lambda t, d: t.to(d)
+
 HUNYUAN_TARGET_REPLACE_MODULES = ["MMDoubleStreamBlock", "MMSingleStreamBlock"]
 
 
@@ -43,6 +51,11 @@ class LoRAModule(torch.nn.Module):
         """
         super().__init__()
         self.lora_name = lora_name
+
+        # Detect RamTorch modules
+        self.is_ramtorch_org = isinstance(org_module, CPUBouncingLinear)
+        if self.is_ramtorch_org:
+            logger.info(f"RamTorch module detected: {lora_name}")
 
         if org_module.__class__.__name__ == "Conv2d":
             in_dim = org_module.in_channels
@@ -97,6 +110,14 @@ class LoRAModule(torch.nn.Module):
     def apply_to(self):
         self.org_forward = self.org_module.forward
         self.org_module.forward = self.forward
+
+        # Setup RamTorch device handling
+        if getattr(self, "is_ramtorch_org", False):
+            # Move LoRA parameters to GPU
+            self.lora_up.to(torch.cuda.current_device())
+            self.lora_down.to(torch.cuda.current_device())
+            self.org_module.cpu()
+
         del self.org_module
 
     def forward(self, x):
@@ -502,11 +523,13 @@ class LoRANetwork(torch.nn.Module):
                 if target_replace_mods is None or module.__class__.__name__ in target_replace_mods:
                     if target_replace_mods is None:  # dirty hack for all modules
                         module = root_module  # search all modules
+                    module.is_ramtorch_org = isinstance(module, CPUBouncingLinear)
 
                     for child_name, child_module in module.named_modules():
-                        is_linear = child_module.__class__.__name__ == "Linear"
+                        is_linear = child_module.__class__.__name__ in ["Linear", "CPUBouncingLinear"]
                         is_conv2d = child_module.__class__.__name__ == "Conv2d"
                         is_conv2d_1x1 = is_conv2d and child_module.kernel_size == (1, 1)
+                        child_module.is_ramtorch_org = isinstance(child_module, CPUBouncingLinear)
 
                         if is_linear or is_conv2d:
                             original_name = (name + "." if name else "") + child_name
