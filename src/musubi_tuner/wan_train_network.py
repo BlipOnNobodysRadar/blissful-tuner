@@ -521,7 +521,7 @@ class WanNetworkTrainer(NetworkTrainer):
 
             if args.use_ramtorch:
                 if isinstance(model_high_noise, torch.nn.Module):
-                    model_high_noise = replace_linear_with_ramtorch(model_high_noise, accelerator.device)
+                    model_high_noise = replace_linear_with_ramtorch(model_high_noise, accelerator.device, dit_weight_dtype)
                     logger.info("RamTorch applied to Wan high noise model.")
 
             if self.blocks_to_swap > 0:
