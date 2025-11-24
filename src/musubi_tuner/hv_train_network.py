@@ -1745,11 +1745,6 @@ class NetworkTrainer:
             vae.requires_grad_(False)
             vae.eval()
 
-        if args.use_ramtorch:
-            if isinstance(vae, torch.nn.Module):
-                vae = replace_linear_with_ramtorch(vae, accelerator.device)
-                logger.info("RamTorch applied to model vae.")
-
         # load DiT model
         blocks_to_swap = args.blocks_to_swap if args.blocks_to_swap else 0
         self.blocks_to_swap = blocks_to_swap
@@ -1778,7 +1773,7 @@ class NetworkTrainer:
 
         if args.use_ramtorch:
             if isinstance(transformer, torch.nn.Module):
-                transformer = replace_linear_with_ramtorch(transformer, accelerator.device)
+                transformer = replace_linear_with_ramtorch(transformer, accelerator.device, dit_weight_dtype)
                 logger.info("RamTorch applied to model transformer.")
 
         if blocks_to_swap > 0:
@@ -1865,7 +1860,7 @@ class NetworkTrainer:
         if args.use_ramtorch_network:
             if isinstance(network, torch.nn.Module):
                 network = network.cpu()
-                network = replace_linear_with_ramtorch(network, accelerator.device)
+                network = replace_linear_with_ramtorch(network, accelerator.device, network_dtype)
                 logger.info("RamTorch applied to network/lora.")
 
         if args.gradient_checkpointing:
@@ -2230,6 +2225,10 @@ class NetworkTrainer:
                     loss = loss.mean()  # mean loss over all elements in batch
 
                     accelerator.backward(loss)
+
+                    if args.use_ramtorch or args.use_ramtorch_network:
+                        torch.cuda.synchronize()
+
                     if accelerator.sync_gradients:
                         # self.all_reduce_network(accelerator, network)  # sync DDP grad manually
                         state = accelerate.PartialState()
