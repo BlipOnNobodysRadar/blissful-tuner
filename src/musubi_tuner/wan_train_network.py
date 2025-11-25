@@ -472,6 +472,7 @@ class WanNetworkTrainer(NetworkTrainer):
         split_attn: bool,
         loading_device: str,
         dit_weight_dtype: Optional[torch.dtype],
+        weight_dtype: Optional[torch.dtype] = None,
     ):
         dit_weight_dtype = None if args.mixed_precision_transformer else dit_weight_dtype
         blissful_kwargs = {
@@ -521,7 +522,7 @@ class WanNetworkTrainer(NetworkTrainer):
 
             if args.use_ramtorch:
                 if isinstance(model_high_noise, torch.nn.Module):
-                    model_high_noise = replace_linear_with_ramtorch(model_high_noise, accelerator.device, dit_weight_dtype)
+                    model_high_noise = replace_linear_with_ramtorch(model_high_noise, accelerator.device, weight_dtype)
                     logger.info("RamTorch applied to Wan high noise model.")
 
             if self.blocks_to_swap > 0:

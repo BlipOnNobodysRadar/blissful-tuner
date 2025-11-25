@@ -1546,6 +1546,7 @@ class NetworkTrainer:
         split_attn: bool,
         loading_device: str,
         dit_weight_dtype: Optional[torch.dtype],
+        weight_dtype: Optional[torch.dtype] = None,
     ):
         transformer = load_transformer(
             dit_path,
@@ -1766,14 +1767,14 @@ class NetworkTrainer:
             )
 
         transformer = self.load_transformer(
-            accelerator, args, args.dit, attn_mode, args.split_attn, loading_device, dit_weight_dtype
+            accelerator, args, args.dit, attn_mode, args.split_attn, loading_device, dit_weight_dtype, weight_dtype
         )
         transformer.eval()
         transformer.requires_grad_(False)
 
         if args.use_ramtorch:
             if isinstance(transformer, torch.nn.Module):
-                transformer = replace_linear_with_ramtorch(transformer, accelerator.device, dit_weight_dtype)
+                transformer = replace_linear_with_ramtorch(transformer, accelerator.device, weight_dtype)
                 logger.info("RamTorch applied to model transformer.")
 
         if blocks_to_swap > 0:
