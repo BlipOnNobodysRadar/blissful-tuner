@@ -1860,7 +1860,7 @@ class NetworkTrainer:
         if args.use_ramtorch_network:
             if isinstance(network, torch.nn.Module):
                 network = network.cpu()
-                network = replace_linear_with_ramtorch(network, accelerator.device, network_dtype)
+                network = replace_linear_with_ramtorch(network, accelerator.device, weight_dtype)
                 logger.info("RamTorch applied to network/lora.")
 
         if args.gradient_checkpointing:
