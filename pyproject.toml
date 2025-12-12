@@ -75,6 +75,9 @@ cu129 = [
     "triton~=3.4.0; platform_system == 'Linux'",
     "triton-windows~=3.4.0.post21; platform_system == 'Windows'",
 ]
+gui = [
+    "gradio>=4.0.0",
+]
 
 [tool.uv]
 conflicts = [
