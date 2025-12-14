@@ -76,7 +76,7 @@ cu129 = [
     "triton-windows~=3.4.0.post21; platform_system == 'Windows'",
 ]
 gui = [
-    "gradio>=4.0.0",
+    "gradio>=4.0.0, <6.0.0",
 ]
 
 [tool.uv]
