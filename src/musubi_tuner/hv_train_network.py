@@ -378,6 +378,11 @@ class NetworkTrainer:
         self.timestep_range_pool = []
         self.num_timestep_buckets: Optional[int] = None  # for get_bucketed_timestep()
 
+    def log_vram_usage(self, stage: str, device: torch.device) -> None:
+        """Hook for subclasses to report VRAM snapshots."""
+
+        return
+
     # TODO 他のスクリプトと共通化する
     def generate_step_logs(
         self,
@@ -1743,6 +1748,8 @@ class NetworkTrainer:
             logger.info(f"mixed precision set to {args.mixed_precision} / mixed precisionを{args.mixed_precision}に設定")
         is_main_process = accelerator.is_main_process
 
+        self.log_vram_usage("post-accelerator-init", accelerator.device)
+
         # prepare dtype
         weight_dtype = torch.float32
         if args.mixed_precision == "fp16":
@@ -1766,6 +1773,8 @@ class NetworkTrainer:
             vae = self.load_vae(args, vae_dtype=vae_dtype, vae_path=args.vae)
             vae.requires_grad_(False)
             vae.eval()
+
+            self.log_vram_usage("after-sample-prompt-prep", accelerator.device)
 
         # load DiT model
         blocks_to_swap = args.blocks_to_swap if args.blocks_to_swap else 0
@@ -1806,6 +1815,8 @@ class NetworkTrainer:
                 blocks_to_swap, accelerator.device, supports_backward=True, use_pinned_memory=args.use_pinned_memory_for_block_swap
             )
             transformer.move_to_device_except_swap_blocks(accelerator.device)
+
+        self.log_vram_usage("after-dit-load", accelerator.device)
 
         # load network model for differential training
         sys.path.append(os.path.dirname(__file__))
@@ -1879,6 +1890,8 @@ class NetworkTrainer:
             # FIXME consider alpha of weights: this assumes that the alpha is not changed
             info = network.load_weights(args.network_weights)
             accelerator.print(f"load network weights from {args.network_weights}: {info}")
+
+        self.log_vram_usage("after-network-attach", accelerator.device)
 
         if args.use_ramtorch_network:
             if isinstance(network, torch.nn.Module):
@@ -1964,6 +1977,8 @@ class NetworkTrainer:
 
         network, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(network, optimizer, train_dataloader, lr_scheduler)
         training_model = network
+
+        self.log_vram_usage("after-accelerator-prepare", accelerator.device)
 
         if args.gradient_checkpointing:
             transformer.train()

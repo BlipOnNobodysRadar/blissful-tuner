@@ -45,6 +45,30 @@ class WanNetworkTrainer(NetworkTrainer):
 
     # region model specific
 
+    def log_vram_usage(self, stage: str, device: torch.device) -> None:
+        """Log a VRAM snapshot for Wan 2.2 runs."""
+
+        if not getattr(self.config, "v2_2", False):
+            return
+        if device.type != "cuda" or not torch.cuda.is_available():
+            return
+
+        device_index = device.index if device.index is not None else torch.cuda.current_device()
+        free, total = torch.cuda.mem_get_info(device_index)
+        allocated = torch.cuda.memory_allocated(device_index)
+        reserved = torch.cuda.memory_reserved(device_index)
+        used = total - free
+
+        to_gib = 2**30
+        logger.info(
+            "[Wan2.2 VRAM] %s | allocated: %.2f GiB | reserved: %.2f GiB | used: %.2f GiB | total: %.2f GiB",
+            stage,
+            allocated / to_gib,
+            reserved / to_gib,
+            used / to_gib,
+            total / to_gib,
+        )
+
     @property
     def architecture(self) -> str:
         return ARCHITECTURE_WAN
